@@ -1,0 +1,13 @@
+{% import 'fileproof/macro.html' as macros %}
+{% extends 'fileproof/layout.html' %}
+{% block content %}
+<p>
+<form action='/fileproof/store' method='POST' enctype="multipart/form-data">
+<label for="file">File</label>
+<p>
+<input type="file" id="files" name="files">
+<input type="submit" value="store">
+</form>
+</p>
+</p>
+{% endblock %}
