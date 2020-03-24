@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+<head>
+<title{{ title }}></title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<link rel="stylesheet" href="/fileproof/static/css/style.css"/>
+</head>
+<body style="visibility:hidden" onLoad="document.body.style.visibility='visible'">
+<h1>
+<a href="/fileproof/">FILE PROOF</a>
+</h1>
+{% block content %}
+<!-- here you go -->
+{% endblock %}
+<footer>
+<hr>
+<p>
+This service is almost based on
+<a href="https://github.com/beyond-blockchain/bbc1/tree/develop/examples/file_proof">file_proof</a>,
+an open source sample program for BBc-1 (Beyond Blockchain One).
+</p>
+</footer>
+</body>
+</html>
