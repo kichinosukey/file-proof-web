@@ -2,12 +2,13 @@
 {% extends 'fileproof/layout.html' %}
 {% block content %}
 <p>
-<form action='/fileproof/store' method='POST' enctype="multipart/form-data">
-<label for="file">File</label>
+<form action="{{ action }}" method='POST' enctype="multipart/form-data">
 <p>
+<label for="file">File</label>
 <input type="file" id="files" name="files">
+</p>
+<p>
 <input type="submit" value="store">
 </form>
-</p>
 </p>
 {% endblock %}

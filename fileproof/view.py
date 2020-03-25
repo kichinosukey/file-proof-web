@@ -1,6 +1,7 @@
 import os
 import binascii
 import json
+from datetime import datetime
 
 import requests
 from flask import Blueprint, jsonify, request, render_template, send_file, session
@@ -84,6 +85,46 @@ def store_id_mappings(name, asset_group_id, transaction_id=None, asset_ids=None)
 def index():
     return render_template('fileproof/index.html')
 
+@fileproof.route('/get', methods=['GET'])
+def set_get_filename():
+    return render_template('fileproof/set_file.html', action='/fileproof/get/file')
+
+@fileproof.route('/get/file', methods=['GET'])
+def get_file():
+
+    if request.method == 'GET':
+
+        filename = request.args.get('file')
+
+        fileinfo = get_id_from_mappings(os.path.basename(filename), asset_group_id)
+        if fileinfo is None:
+            return render_template('fileproof/message.html', 
+                    message="%s is not found." % filename)
+
+        r = requests.get(PREFIX_API + '/api/file', 
+                params={
+                    'asset_id_str': bbclib.convert_id_to_string(fileinfo['asset_id']),
+                    'domain_id_str': domain_id_str,
+                    'user_id_str': user_id_str,
+                    'asset_group_id_str': asset_group_id_str,
+                    })
+
+        res = r.json()
+
+        out_file_name, ext = os.path.splitext(filename)
+        if os.path.exists(out_file_name):
+            current_datetime = datetime.now()
+            time_str = current_datetime.strftime('_%Y%m%d%H%M%S')
+            out_file_name += (time_str + ext)
+        else:
+            out_file_name += ext
+
+        with open(out_file_name, "wb") as outfile:
+            outfile.write(binascii.a2b_hex(res['file']))
+
+        return render_template('fileproof/message.html', 
+                    message="done get %s" % out_file_name)
+
 @fileproof.route('/keypair', methods=['GET'])
 def get_keypair():
 
@@ -96,7 +137,37 @@ def get_keypair():
     session['private_key_str'] = privkey_str
     session['public_key_str'] = pubkey_str
 
-    return render_template('fileproof/keypair_success.html')
+    return render_template('fileproof/message.html', 
+                message="Keypair was created successfully.")
+
+@fileproof.route('/list', methods=['GET'])
+def list_transaction():
+
+    if request.method == 'GET':
+
+        asset_id_str = request.args.get('asset_id_str')
+        count = request.args.get('count')
+        direction = request.args.get('direction')
+        start_from = request.args.get('start_from')
+        until = request.args.get('until')
+        user_id_search_str = request.args.get('user_id_str')
+
+        r = requests.get(PREFIX_API + '/api/transactions', 
+                params={
+                    'asset_id_str': asset_id_str,
+                    'asset_group_id_str': asset_group_id_str,
+                    'count': count,
+                    'domain_id_str': domain_id_str,
+                    'direction': direction,
+                    'start_from': start_from,
+                    'until': until,
+                    'user_id_search_str': user_id_search_str,
+                    'user_id_str': user_id_str
+                })
+        res = r.json()
+
+        return render_template('fileproof/list.html', 
+                    transactions=res['transactions'])
 
 @fileproof.route('/setup', methods=['GET'])
 def domain_setup():
@@ -104,27 +175,25 @@ def domain_setup():
     r = requests.post(PREFIX_API + '/api/domain', json={'domain_id_str': domain_id_str})
     res = r.json()
 
-    return render_template('fileproof/setup_success.html', domain_id=res['domain_id_str'])
+    return render_template('fileproof/message.html', 
+                message="Domain ID(%s) setup was success." % res['domain_id_str'])
 
 @fileproof.route('/store', methods=['GET', 'POST'])
 def store_file():
 
     if request.method == 'GET':
-        return render_template('fileproof/store_file.html')
+        return render_template('fileproof/store_file.html', action='/fileproof/store')
 
     file = request.files.getlist('files')[0]
     if file and allowed_file(file.filename):
+        data = file.read()
+        data_non_bytes = binascii.b2a_hex(data).decode('utf-8')
         filename = secure_filename(file.filename)
         filepath = './' + filename #FIXME specific data directory is needed
-        file.save(filepath)
 
     fileinfo = get_id_from_mappings(os.path.basename(filepath), asset_group_id)
     if fileinfo is not None:
         return render_template('fileproof/fileinfo_already_exists.html')
-    
-    with open(filepath, "rb") as fin:
-        data = fin.read()
-    data_non_bytes = binascii.b2a_hex(data).decode('utf-8')
 
     user_info = "Owner is %s" % user_name
     
@@ -134,18 +203,122 @@ def store_file():
                 'asset_file': data_non_bytes,
                 'asset_group_id_str': asset_group_id_str,
                 'domain_id_str': domain_id_str, 
-                'fileinfo': fileinfo,
                 'private_key_str': session['private_key_str'],
                 'public_key_str': session['public_key_str'],
+                'tx_id_str': None,
                 'user_id_str': user_id_str})
 
     res = r.json()
-    asset_ids_str = res['asset_ids_str']
-    asset_ids = binascii.a2b_hex(asset_ids_str)
-    transaction_id_str = res['transaction_id_str']
-    transaction_id = binascii.a2b_hex(transaction_id_str)
 
-    store_id_mappings(os.path.basename(filepath), asset_group_id, 
-            transaction_id=transaction_id, asset_ids=asset_ids)
+    if res['status'] == 'success':
+        asset_ids = binascii.a2b_hex(res['asset_ids_str'])
+        transaction_id = binascii.a2b_hex(res['transaction_id_str'])
 
-    return jsonify({'asset_ids_str': asset_ids_str, 'transaction_id_str': transaction_id_str})
+        store_id_mappings(os.path.basename(filepath), asset_group_id, 
+                transaction_id=transaction_id, asset_ids=asset_ids)
+
+        message = "Store file was success. \n"
+        message += "asset_id: %s \n" % res['asset_ids_str']
+        message += "transaction_id: %s \n" % res['transaction_id_str']
+
+    elif res['status'] == 'error':
+        message = res['message']
+
+    return render_template('fileproof/message.html', message=message)
+
+
+@fileproof.route('/update', methods=['GET', 'POST'])
+def update_file():
+
+    if request.method == 'GET':
+        return render_template('fileproof/store_file.html', action='/fileproof/update')
+
+    elif request.method == 'POST':
+
+        file = request.files.getlist('files')[0]
+        if file and allowed_file(file.filename):
+            data = file.read()
+            data_non_bytes = binascii.b2a_hex(data).decode('utf-8')
+            filename = secure_filename(file.filename)
+            filepath = './' + filename #FIXME specific data directory is needed
+
+        else:
+            return render_template('fileproof/message.html', 
+                    message='ERROR: file must be selected and allowed file type.')
+
+        fileinfo = get_id_from_mappings(os.path.basename(filepath), asset_group_id)
+        if fileinfo is None:
+            return render_template('fileproof/fileinfo_already_exists.html', file=filename)
+
+        user_info = "Owner is %s" % user_name
+
+        transaction_id = fileinfo['transaction_id']
+        transaction_id_str = bbclib.convert_id_to_string(transaction_id)
+
+        r = requests.post(PREFIX_API + '/api/file', 
+                json={
+                    'asset_body': user_info,
+                    'asset_file': data_non_bytes,
+                    'asset_group_id_str': asset_group_id_str,
+                    'domain_id_str': domain_id_str, 
+                    'private_key_str': session['private_key_str'],
+                    'public_key_str': session['public_key_str'],
+                    'tx_id_str': transaction_id_str,
+                    'user_id_str': user_id_str})
+
+        res = r.json()
+
+        if res['status'] == 'success':
+            asset_ids = binascii.a2b_hex(res['asset_ids_str'])
+            transaction_id = binascii.a2b_hex(res['transaction_id_str'])
+
+            store_id_mappings(os.path.basename(filepath), asset_group_id, 
+                transaction_id=transaction_id, asset_ids=asset_ids)
+
+            message = "File update was success.\n"
+            message += "asset_ids: %s \n" % res['asset_ids_str']
+            message += "transaction_id: %s \n" % res['transaction_id_str']
+        
+        elif res['status'] == 'error':
+            message = res['message']
+
+        return render_template('fileproof/message.html', message=message)
+
+@fileproof.route('/verify', methods=['GET'])
+def verify():
+    if request.method == 'GET':
+        return render_template('fileproof/set_file.html', action='/fileproof/verify/file')
+
+@fileproof.route('/verify/file', methods=['GET'])
+def verify_file():
+    if request.method == 'GET':
+
+        filename = request.args.get('file')
+        fileinfo = get_id_from_mappings(os.path.basename(filename), asset_group_id)
+        if fileinfo is None:
+            return render_template('fileproof/message.html', 
+                    message="%s is not found." % filename)
+
+        asset_id = fileinfo['asset_id']
+        asset_id_str = bbclib.convert_id_to_string(asset_id)
+
+        r = requests.get(PREFIX_API + '/api/file/verification',
+                    params={
+                        'asset_id_str': asset_id_str,
+                        'asset_group_id_str': asset_group_id_str,
+                        'domain_id_str': domain_id_str,
+                        'user_id_str': user_id_str
+                    })
+
+        res = r.json()
+
+        if res['status'] == 'valid':
+            message = "%s is valid." % filename
+
+        elif res['status'] == 'invalid' and res['message'] is None:
+            message = "%s is invalid" % filename
+
+        else:
+            message = "Transaction data is invalid."
+
+        return render_template('fileproof/message.html', message=message)

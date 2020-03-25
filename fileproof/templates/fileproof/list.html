@@ -1,0 +1,26 @@
+{% import 'fileproof/macro.html' as macros %}
+{% extends 'fileproof/layout.html' %}
+{% block content %}
+<table>
+    <thead>
+        <tr>
+            <th>Transaction ID</th>
+            <th>Asset Group ID</th>
+            <th>Asset ID</th>
+            <th>User ID</th>
+            <th>Timestamp</th>
+        </tr>
+    </thead>
+    {% for tx in transactions %}
+    <tbody>
+        <tr>
+            <td>{{ tx['transaction_id'] }}</td>
+            <td>{{ tx['asset_group_id'] }}</td>
+            <td>{{ tx['asset_id'] }}</td>
+            <td>{{ tx['user_id'] }}</td>
+            <td>{{ tx['timestamp'] }}</td>
+        </tr>
+    </tbody>
+    {% endfor %}
+</table>
+{% endblock %}
