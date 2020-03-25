@@ -1,0 +1,9 @@
+{% import 'fileproof/macro.html' as macros %}
+{% extends 'fileproof/layout.html' %}
+{% block content %}
+<form method='GET' action="{{ action }}">
+    <label for="file">FILE NAME</label>
+    <input type="text" id="file" name="file">
+    <input type="submit" value="get">
+</form>
+{% endblock %}
