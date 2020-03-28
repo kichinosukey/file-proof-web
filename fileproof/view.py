@@ -22,11 +22,9 @@ ALLOWED_EXTENSIONS = {'txt'}
 
 fileproof = Blueprint('fileproof', __name__, static_folder='./static', template_folder='./templates')
 
-domain_id = bbclib.get_new_id("file_proof_web", include_timestamp=False)
-domain_id_str = bbclib.convert_id_to_string(domain_id)
+
 asset_group_id = bbclib.get_new_id("file_proof_asset_group", include_timestamp=False)
 asset_group_id_str = bbclib.convert_id_to_string(asset_group_id)
-key_pair = None
 
 
 def allowed_file(filename):
@@ -55,6 +53,26 @@ def get_id_from_mappings(name, asset_group_id):
                 result['asset_id'] = binascii.a2b_hex(mapping[asset_group_id_str][name]['asset_id'])
         return result
     return None
+
+def replace_keypair():
+    if session.get('username') is None:
+        return render_template('fileproof/message.html', message="user name is not in session.")
+    
+    if session.get('password_digest_str') is None:
+        return render_template('fileproof/message.html', message="password is not in session.")
+    
+    r = requests.post(PREFIX_API + '/api/new-keypair',
+            json={
+                'username': session['username'],
+                'password_digest_str': session['password_digest_str']
+                })
+    res = r.json()
+
+    if r.status_code != 200:
+        return render_template('fileproof/message.html', message="Failed to replace keypair.")
+
+    session['public_key_str'] = res['public_key_str']
+    session['private_key_str'] = res['private_key_str']
 
 def store_id_mappings(name, asset_group_id, transaction_id=None, asset_ids=None):
     if transaction_id is None and asset_ids is None:
@@ -107,7 +125,6 @@ def get_file():
         r = requests.get(PREFIX_API + '/api/file', 
                 params={
                     'asset_id_str': bbclib.convert_id_to_string(fileinfo['asset_id']),
-                    'domain_id_str': domain_id_str,
                     'user_id_str': session['user_id_str'],
                     'asset_group_id_str': asset_group_id_str,
                     })
@@ -127,27 +144,6 @@ def get_file():
 
         return render_template('fileproof/message.html', 
                     message="done get %s" % out_file_name)
-
-@fileproof.route('/keypair', methods=['GET'])
-def get_keypair():
-
-    if session.get('username') is None:
-        return redirect('/fileproof/sign-in')
-
-    r = requests.get(PREFIX_API + '/api/keypair')
-    res = r.json()
-
-    if r.status_code != 200:
-        return render_template('fileproof/message.html', message="ERROR: Failed to create keypair.")
-
-    privkey_str = res['private_key_str']
-    pubkey_str = res['public_key_str']
-
-    session['private_key_str'] = privkey_str
-    session['public_key_str'] = pubkey_str
-
-    return render_template('fileproof/message.html', 
-                message="Keypair was created successfully.")
 
 @fileproof.route('/list', methods=['GET'])
 def list_transaction():
@@ -169,7 +165,6 @@ def list_transaction():
                     'asset_id_str': asset_id_str,
                     'asset_group_id_str': asset_group_id_str,
                     'count': count,
-                    'domain_id_str': domain_id_str, 
                     'direction': direction,
                     'start_from': start_from,
                     'until': until,
@@ -199,9 +194,9 @@ def signin():
         if username is None or len(username) <= 0:
             return render_template('fileproof/message.html', message='ERROR: User name is missing.')
 
-        r = requests.get(PREFIX_API + '/api/user',
+        r = requests.get(PREFIX_API + '/api/user/keypair',
                 params={
-                    'password': password_digest_str,
+                    'password_digest_str': password_digest_str,
                     'username': username
                 })
         res = r.json()
@@ -211,8 +206,10 @@ def signin():
 
         session['username'] = username
         session['user_id_str'] = res['user_id_str']
+        session['public_key_str'] = res['public_key_str']
+        session['private_key_str'] = res['private_key_str']
 
-        return render_template('fileproof/index.html')
+        return render_template('fileproof/message.html', message="Getting keypair was success.")
 
 @fileproof.route('/sign-up', methods=['GET', 'POST'])
 def signup():
@@ -241,14 +238,14 @@ def signup():
 
         r = requests.post(PREFIX_API + '/api/user', 
                 json={
-                    'password': password_digest_str,
+                    'password_digest_str': password_digest_str,
                     'username': username
                 })
         res = r.json()
 
         if r.status_code != 200:
             return render_template('fileproof/message.html', message=res['message'])
-
+        
         return redirect('/fileproof/sign-in')
 
 @fileproof.route('/store', methods=['GET', 'POST'])
@@ -279,7 +276,6 @@ def store_file():
                 'asset_body': user_info,
                 'asset_file': data_non_bytes,
                 'asset_group_id_str': asset_group_id_str,
-                'domain_id_str': domain_id_str, 
                 'private_key_str': session['private_key_str'],
                 'public_key_str': session['public_key_str'],
                 'tx_id_str': None,
@@ -297,6 +293,8 @@ def store_file():
     message = "Store file was success. \n"
     message += "asset_id: %s \n" % res['asset_ids_str']
     message += "transaction_id: %s \n" % res['transaction_id_str']
+
+    replace_keypair()
 
     return render_template('fileproof/message.html', message=message)
 
@@ -322,7 +320,7 @@ def update_file():
             return render_template('fileproof/message.html', 
                     message='ERROR: file must be selected and allowed file type.')
 
-        fileinfo = get_id_from_mappings(os.path.basename(filepath), asset_group_id_str)
+        fileinfo = get_id_from_mappings(os.path.basename(filepath), asset_group_id)
         if fileinfo is None:
             return render_template('fileproof/message.html', message="ERROR: %s is already existed." % file.filename)
 
@@ -340,6 +338,7 @@ def update_file():
                     'public_key_str': session['public_key_str'],
                     'tx_id_str': transaction_id_str,
                     'user_id_str': session['user_id_str']})
+
         res = r.json()
 
         if r.status_code != 200:
@@ -353,6 +352,8 @@ def update_file():
         message = "File update was success.\n"
         message += "asset_ids: %s \n" % res['asset_ids_str']
         message += "transaction_id: %s \n" % res['transaction_id_str']
+
+        replace_keypair()
 
         return render_template('fileproof/message.html', message=message)
 
@@ -386,7 +387,6 @@ def verify_file():
                     params={
                         'asset_id_str': asset_id_str,
                         'asset_group_id_str': asset_group_id_str,
-                        'domain_id_str': domain_id_str,
                         'user_id_str': session['user_id_str']
                     })
         res = r.json()

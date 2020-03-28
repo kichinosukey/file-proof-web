@@ -241,9 +241,6 @@ def store_file():
         asset_group_id_str = request.args.get('asset_group_id_str')
         asset_group_id = bbclib.convert_idstring_to_bytes(asset_group_id_str)
         
-        domain_id_str = request.args.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
-        
         user_id_str = request.args.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
 
@@ -283,9 +280,6 @@ def store_file():
         asset_group_id_str = request.json.get('asset_group_id_str')
         asset_group_id = bbclib.convert_idstring_to_bytes(asset_group_id_str)
         
-        domain_id_str = request.json.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
-        
         private_key_str = request.json.get('private_key_str')
         private_key = bbclib.convert_idstring_to_bytes(private_key_str)
         
@@ -298,7 +292,7 @@ def store_file():
         if tx_id_str is not None:
             tx_id = bbclib.convert_idstring_to_bytes(tx_id_str)
         else:
-            tx_id = tx_id_str
+            tx_id = None
         
         user_id_str = request.json.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
@@ -326,9 +320,6 @@ def verify_file():
 
         asset_group_id_str = request.args.get('asset_group_id_str')
         asset_group_id = bbclib.convert_idstring_to_bytes(asset_group_id_str)
-
-        domain_id_str = request.args.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
 
         user_id_str = request.args.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
@@ -373,6 +364,39 @@ def create_keypair():
         return jsonify(private_key_str=bbclib.convert_id_to_string(keypair.private_key), 
             public_key_str=bbclib.convert_id_to_string(keypair.public_key)), 200
 
+@api.route('/new-keypair', methods=['POST'])
+def replace_keypair():
+
+    username = request.json.get('username')
+    password_digest_str = request.json.get('password_digest_str')
+
+    if username is None:
+        return jsonify(message="user name is nothing."), 404
+    user = g.store.read_user(username, 'user_table')
+
+    if user is None:
+        return jsonify(message='user {0} is not found'.format(username)), 404
+    
+    if user.password != password_digest_str:
+        return jsonify(message='password is incorrect.'), 404
+
+    keypair_old = user.keypair
+
+    keypair = bbclib.KeyPair()
+    keypair.generate()
+
+    g.idPubkeyMap = id_lib.BBcIdPublickeyMap(domain_id)
+    g.idPubkeyMap.update(user.user_id, 
+            public_key_to_replace=[keypair.public_key], keypair=keypair_old)
+    
+    user.keypair = keypair
+    g.store.update(user, 'user_table')
+
+    return jsonify(pulic_key_str=bbclib.convert_id_to_string(keypair.public_key),
+                private_key_str=bbclib.convert_id_to_string(keypair.private_key)), 200
+
+
+
 @api.route('/transactions', methods=['GET'])
 def get_transactions():
 
@@ -412,9 +436,6 @@ def get_transactions():
         else:
             user_id_search = None
         
-        domain_id_str = request.args.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
-
         user_id_str = request.args.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
 
@@ -446,29 +467,37 @@ def get_transactions():
 @api.route('/user', methods=['GET'])
 def list_users():
 
+    users = g.store.get_users('uset_table')
+    dics = [{'username': user.name, 'user_id': bbclib.convert_id_to_string(user.user_id)} for user in users]
+    return jsonify(users=dics), 200
+
+@api.route('/user/keypair', methods=['GET'])
+def get_user_keypair():
+    
     username = request.args.get('username')
+    password_digest_str = request.args.get('password_digest_str')
 
-    if username is None:
-        users = g.store.get_users('uset_table')
-        dics = [{'username': user.name, 'user_id': bbclib.convert_id_to_string(user.user_id)} for user in users]
-        return jsonify(users=dics), 200
+    user = g.store.read_user(username, 'user_table')
+    if user is None:
+        return jsonify(message='user {0} is not found'.format(username)), 404
+    
+    if user.password != password_digest_str:
+        return jsonify(message='password is incorrect.'), 404
 
-    else:
-        user = g.store.read_user(username, 'user_table')
-        if user is None:
-            return jsonify(message='user {0} is not found'.format(username)), 404
-
-        return jsonify(username=username, 
-                user_id_str=bbclib.convert_id_to_string(user.user_id)), 200
+    return jsonify(username=username, 
+            user_id_str=bbclib.convert_id_to_string(user.user_id),
+            public_key_str=bbclib.convert_id_to_string(user.keypair.public_key),
+            private_key_str=bbclib.convert_id_to_string(user.keypair.private_key)
+            ), 200
 
 @api.route('/user', methods=['POST'])
 def define_user():
 
     if request.method == 'POST':
 
-        password = request.json.get('password')
+        password = request.json.get('password_digest_str')
         if password is None:
-            abort_by_missing_param('password')
+            abort_by_missing_param('password_digest_str')
         
         username = request.json.get('username')
         if username is None:
@@ -477,10 +506,12 @@ def define_user():
         if g.store.user_exists(username, 'user_table'):
             return jsonify(message='user {0} is already defined.'.format(username)), 409
 
-        idPubkeyMap = id_lib.BBcIdPublickeyMap(domain_id) 
+        idPubkeyMap = id_lib.BBcIdPublickeyMap(domain_id)
         user_id, keypairs = idPubkeyMap.create_user_id(num_pubkeys=1)
 
         g.store.write_user(User(user_id, username, password, keypairs[0]), 'user_table')
 
-        return jsonify(user_id_str=bbclib.convert_id_to_string(user_id), 
+        return jsonify(user_id_str=bbclib.convert_id_to_string(user_id),
+                public_key=bbclib.convert_id_to_string(keypairs[0].public_key),
+                private_key=bbclib.convert_id_to_string(keypairs[0].private_key), 
                 username=username), 200
