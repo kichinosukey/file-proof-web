@@ -6,7 +6,7 @@ import json
 import sys
 from datetime import datetime
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, abort, g, jsonify, request
 
 from bbc1.core import bbc_app
 from bbc1.core.bbc_config import DEFAULT_CORE_PORT
@@ -14,6 +14,141 @@ from bbc1.core import bbclib
 from bbc1.core.message_key_types import KeyType
 from bbc1.core.bbc_error import ESUCCESS
 
+from bbc1.lib.app_support_lib import Database
+from bbc1.lib import id_lib
+
+
+domain_id = bbclib.get_new_id("file_proof_web", include_timestamp=False)
+domain_id_str = bbclib.convert_id_to_string(domain_id)
+
+NAME_OF_DB = 'fileproof_db'
+
+fileproof_user_table_definition = [
+    ["user_id", "BLOB"],
+    ["name", "TEXT"],
+    ["password", "TEXT"],
+    ["public_key", "BLOB"],
+    ["private_key", "BLOB"]
+]
+
+IDX_USER_ID = 0
+IDX_NAME = 1
+IDX_PASSWORD = 2
+IDX_PUBKEY = 3
+IDX_PRIVKEY = 4
+
+class User:
+
+    def __init__(self, user_id, name, password, keypair):
+        self.user_id = user_id
+        self.name = name
+        self.password = password
+        self.keypair = keypair
+
+    @staticmethod
+    def from_row(row):
+        return User(
+            row[IDX_USER_ID],
+            row[IDX_NAME],
+            row[IDX_PASSWORD],
+            bbclib.KeyPair(privkey=row[IDX_PRIVKEY], pubkey=row[IDX_PUBKEY])
+        )
+
+
+class Store:
+
+    def __init__(self, domain_id):
+        self.domain_id = domain_id
+        self.db = Database()
+        self.db.setup_db(self.domain_id, NAME_OF_DB)
+
+    def close(self):
+        self.db.close_db(self.domain_id, NAME_OF_DB)
+
+    def get_user(self, user_id, table):
+        rows = self.db.exec_sql(
+            self.domain_id, 
+            NAME_OF_DB,
+            'select * from ' + table + ' where user_id=?',
+            user_id
+        )
+        if len(rows) <= 0:
+            return None
+        return User.from_row(rows[0])
+
+    def get_users(self, table):
+        rows = self.db.exec_sql(
+            self.domain_id,
+            NAME_OF_DB,
+            'select * from ' + table
+            )
+        return [User.from_row(row) for row in rows]
+
+    def read_user(self, name, table):
+        rows = self.db.exec_sql(
+            self.domain_id,
+            NAME_OF_DB,
+            'select * from ' + table + ' where name=?',
+            name
+        )
+        if len(rows) <= 0:
+            return None
+        return User.from_row(rows[0])
+
+    def setup(self):
+        self.db.create_table_in_db(self.domain_id, NAME_OF_DB, 
+                'user_table', fileproof_user_table_definition, 
+                primary_key=IDX_USER_ID, indices=[IDX_NAME])
+
+    def update_keypair(self, user, table):
+        self.db.exec_sql(
+            self.domain_id,
+            NAME_OF_DB,
+            'update ' + table + 'set public_key=?, private_key=? ' + \
+            'where user_id=? and password=?',
+            user.keypair.public_key,
+            user.keypair.private_key,
+            user.user_id,
+            user.password
+        )
+    
+    def update_password(self, password, user, table):
+        self.db.exec_sql(
+            self.domain_id, 
+            NAME_OF_DB,
+            'update ' + table + 'set password=? where user_id=? and password=?',
+            password,
+            user.user_id,
+            user.password
+        )
+
+    def user_exists(self, name, table):
+        rows = self.db.exec_sql(
+            self.domain_id,
+            NAME_OF_DB,
+            'select rowid from ' + table + ' where name=?',
+            name
+        )
+        return len(rows) > 0
+
+
+    def write_user(self, user, table):
+        self.db.exec_sql(
+            self.domain_id,
+            NAME_OF_DB,
+            'insert into ' + table + ' values (?, ?, ?, ?, ?)',
+            user.user_id,
+            user.name,
+            user.password,
+            user.keypair.public_key,
+            user.keypair.private_key
+        )
+
+def abort_by_missing_param(param):
+    abort(400, {
+        'code': 'Bad Request', 
+        'message': '{0} is missing'.format(param)
+    })
 
 def get_asset_file(transaction, response_data):
     if KeyType.all_asset_files in response_data:
@@ -25,22 +160,6 @@ def get_asset_file(transaction, response_data):
 
 def get_asset_body(transaction):
     return transaction.relations[0].asset.asset_body
-
-def get_tx_list(client, asset_group_id=None, asset_id=None, user_id=None, 
-                    start_from=None, until=None, direction=0, count=0):
-
-    ret = client.search_transaction_with_condition(
-        asset_group_id=asset_group_id, asset_id=asset_id, user_id=user_id,
-        start_from=start_from, until=until, direction=direction, count=count)
-    assert ret
-
-    response_data = client.callback.synchronize()
-    if response_data[KeyType.status] < ESUCCESS:
-        return None, None, "ERROR: %s" % response_data[KeyType.reason].decode('utf-8')
-    
-    transactions = [bbclib.deserialize(data) for data in response_data[KeyType.transactions]]
-
-    return transactions, response_data, None
 
 def setup_bbc_client(domain_id, user_id):
     bbc_app_client = bbc_app.BBcAppClient(port=DEFAULT_CORE_PORT, multiq=False, loglevel="all")
@@ -92,21 +211,24 @@ def store_proc(asset_body, asset_file, asset_group_id, domain_id, key_pair, user
 api = Blueprint('api', __name__)
 
 
-@api.route('/domain', methods=['POST'])
-def setup():
+@api.before_request
+def before_request():
+    g.store = Store(domain_id)
+    g.store.setup()
+    g.idPubkeyMap = None
 
-    domain_id_str = request.json.get('domain_id_str')
-    domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
+
+@api.route('/domain', methods=['GET'])
+def connect_core_to_domain():
 
     tmpclient = bbc_app.BBcAppClient(port=DEFAULT_CORE_PORT, 
             multiq=False, loglevel='all') 
-    if os.path.exists('node_key.pem'):
-        tmpclient.set_node_key('node_key.pem')
+
     tmpclient.domain_setup(domain_id)
     tmpclient.callback.synchronize()
     tmpclient.unregister_from_core()
     
-    return jsonify({'domain_id_str': bbclib.convert_id_to_string(domain_id)})
+    return jsonify(domain_id=domain_id_str), 200
 
 @api.route('/file', methods=['GET', 'POST'])
 def store_file():
@@ -119,22 +241,20 @@ def store_file():
         asset_group_id_str = request.args.get('asset_group_id_str')
         asset_group_id = bbclib.convert_idstring_to_bytes(asset_group_id_str)
         
-        domain_id_str = request.args.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
-        
         user_id_str = request.args.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
 
         bbc_app_client = setup_bbc_client(domain_id, user_id)
-        transactions, response_data, msg = get_tx_list(bbc_app_client, 
-                        asset_group_id=asset_group_id, asset_id=asset_id)
-        if msg is not None:
-            return jsonify({
-                'file': None,
-                'message': msg,
-                'status': 'error'
-                })
 
+        ret = bbc_app_client.search_transaction_with_condition(
+                asset_group_id=asset_group_id, asset_id=asset_id, user_id=user_id)
+        assert ret
+
+        response_data = bbc_app_client.callback.synchronize()
+        if response_data[KeyType.status] < ESUCCESS:
+            return jsonify(message="ERROR: %s" % response_data[KeyType.reason].decode('utf-8')), 404
+        
+        transactions = [bbclib.deserialize(data) for data in response_data[KeyType.transactions]]
         get_transaction, fmt_type = transactions[0]
 
         if KeyType.all_asset_files in response_data:
@@ -160,9 +280,6 @@ def store_file():
         asset_group_id_str = request.json.get('asset_group_id_str')
         asset_group_id = bbclib.convert_idstring_to_bytes(asset_group_id_str)
         
-        domain_id_str = request.json.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
-        
         private_key_str = request.json.get('private_key_str')
         private_key = bbclib.convert_idstring_to_bytes(private_key_str)
         
@@ -175,7 +292,7 @@ def store_file():
         if tx_id_str is not None:
             tx_id = bbclib.convert_idstring_to_bytes(tx_id_str)
         else:
-            tx_id = tx_id_str
+            tx_id = None
         
         user_id_str = request.json.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
@@ -184,21 +301,14 @@ def store_file():
             store_proc(asset_body, asset_file_bytes, asset_group_id, 
                 domain_id, keypair, user_id, txid=tx_id)
 
-        if asset_ids is not None and transaction_id is not None:
-            asset_ids_str = binascii.b2a_hex(asset_ids).decode('utf-8')
-            transaction_id_str = binascii.b2a_hex(transaction_id).decode('utf-8')
-            status = "success"
-        else:
-            asset_ids_str = None
-            transaction_id_str = None
-            status = "error"
+        if asset_ids is None:
+            return jsonify(message="ERROR: asset_id is not found"), 404
 
-        return jsonify({
-            'asset_ids_str': asset_ids_str, 
-            'transaction_id_str': transaction_id_str,
-            'status': status,
-            'message': message 
-            })
+        if transaction_id is None:
+            return jsonify(message="ERROR: transaction_id is not found"), 404
+
+        return jsonify(asset_ids_str=bbclib.convert_id_to_string(asset_ids), 
+                transaction_id_str=bbclib.convert_id_to_string(transaction_id)), 200
 
 @api.route('/file/verification', methods=['GET'])
 def verify_file():
@@ -211,22 +321,26 @@ def verify_file():
         asset_group_id_str = request.args.get('asset_group_id_str')
         asset_group_id = bbclib.convert_idstring_to_bytes(asset_group_id_str)
 
-        domain_id_str = request.args.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
-
         user_id_str = request.args.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
 
         bbc_app_client = setup_bbc_client(domain_id, user_id)
 
-        transactions, response_data, msg = get_tx_list(\
-            bbc_app_client, asset_group_id=asset_group_id, asset_id=asset_id)
+        ret = bbc_app_client.search_transaction_with_condition(
+                asset_group_id=asset_group_id, asset_id=asset_id, user_id=user_id)
+        assert ret
+
+        response_data = bbc_app_client.callback.synchronize()
+        if response_data[KeyType.status] < ESUCCESS:
+            return jsonify(message="ERROR: %s" % response_data[KeyType.reason].decode('utf-8')), 404
+        
+        transactions = [bbclib.deserialize(data) for data in response_data[KeyType.transactions]]
 
         transaction, fmt = transactions[0]
 
         digest = transaction.digest()
         if not transaction.signatures[0].verify(digest):
-            return jsonify({'status': 'invalid'})
+            return jsonify(message="ERROR: Transaction digest is invalid."), 404
 
         if get_asset_file(transaction, response_data) is not None:
             data = get_asset_file(transaction, response_data)
@@ -235,9 +349,9 @@ def verify_file():
 
         file_digest = hashlib.sha256(data).digest()
         if file_digest == transaction.relations[0].asset.asset_file_digest:
-            return jsonify({'status': 'valid'})
+            return jsonify(), 200
         else:
-            return jsonify({'status': 'invalid'})
+            return jsonify(message="ERROR: Asset file digest is invalid."), 404
 
 @api.route('/keypair', methods=['GET'])
 def create_keypair():
@@ -247,10 +361,41 @@ def create_keypair():
         keypair = bbclib.KeyPair()
         keypair.generate()
 
-        return jsonify({
-            'private_key_str': bbclib.convert_id_to_string(keypair.private_key), 
-            'public_key_str': bbclib.convert_id_to_string(keypair.public_key)
-            })
+        return jsonify(private_key_str=bbclib.convert_id_to_string(keypair.private_key), 
+            public_key_str=bbclib.convert_id_to_string(keypair.public_key)), 200
+
+@api.route('/new-keypair', methods=['POST'])
+def replace_keypair():
+
+    username = request.json.get('username')
+    password_digest_str = request.json.get('password_digest_str')
+
+    if username is None:
+        return jsonify(message="user name is nothing."), 404
+    user = g.store.read_user(username, 'user_table')
+
+    if user is None:
+        return jsonify(message='user {0} is not found'.format(username)), 404
+    
+    if user.password != password_digest_str:
+        return jsonify(message='password is incorrect.'), 404
+
+    keypair_old = user.keypair
+
+    keypair = bbclib.KeyPair()
+    keypair.generate()
+
+    g.idPubkeyMap = id_lib.BBcIdPublickeyMap(domain_id)
+    g.idPubkeyMap.update(user.user_id, 
+            public_key_to_replace=[keypair.public_key], keypair=keypair_old)
+    
+    user.keypair = keypair
+    g.store.update(user, 'user_table')
+
+    return jsonify(pulic_key_str=bbclib.convert_id_to_string(keypair.public_key),
+                private_key_str=bbclib.convert_id_to_string(keypair.private_key)), 200
+
+
 
 @api.route('/transactions', methods=['GET'])
 def get_transactions():
@@ -291,18 +436,21 @@ def get_transactions():
         else:
             user_id_search = None
         
-        domain_id_str = request.args.get('domain_id_str')
-        domain_id = bbclib.convert_idstring_to_bytes(domain_id_str)
-
         user_id_str = request.args.get('user_id_str')
         user_id = bbclib.convert_idstring_to_bytes(user_id_str)
 
         bbc_app_client =setup_bbc_client(domain_id, user_id)
-        transactions, response_data, msg = get_tx_list(bbc_app_client, 
-                asset_group_id=asset_group_id, asset_id=asset_id, 
-                user_id=user_id_search, start_from=start_from, until=until, 
-                direction=direction, count=count)
+
+        ret = bbc_app_client.search_transaction_with_condition(
+                asset_group_id=asset_group_id, asset_id=asset_id, user_id=user_id)
+        assert ret
+
+        response_data = bbc_app_client.callback.synchronize()
+        if response_data[KeyType.status] < ESUCCESS:
+            return jsonify(message="ERROR: %s" % response_data[KeyType.reason].decode('utf-8')), 404
         
+        transactions = [bbclib.deserialize(data) for data in response_data[KeyType.transactions]]
+
         dics = []
         for tx_tuple in transactions:
             tx, fmt_type = tx_tuple
@@ -314,4 +462,56 @@ def get_transactions():
                 'timestamp': datetime.fromtimestamp(tx.timestamp / 1000)
             })
         
-        return jsonify({'transactions': dics})
+        return jsonify(transactions=dics), 200
+
+@api.route('/user', methods=['GET'])
+def list_users():
+
+    users = g.store.get_users('uset_table')
+    dics = [{'username': user.name, 'user_id': bbclib.convert_id_to_string(user.user_id)} for user in users]
+    return jsonify(users=dics), 200
+
+@api.route('/user/keypair', methods=['GET'])
+def get_user_keypair():
+    
+    username = request.args.get('username')
+    password_digest_str = request.args.get('password_digest_str')
+
+    user = g.store.read_user(username, 'user_table')
+    if user is None:
+        return jsonify(message='user {0} is not found'.format(username)), 404
+    
+    if user.password != password_digest_str:
+        return jsonify(message='password is incorrect.'), 404
+
+    return jsonify(username=username, 
+            user_id_str=bbclib.convert_id_to_string(user.user_id),
+            public_key_str=bbclib.convert_id_to_string(user.keypair.public_key),
+            private_key_str=bbclib.convert_id_to_string(user.keypair.private_key)
+            ), 200
+
+@api.route('/user', methods=['POST'])
+def define_user():
+
+    if request.method == 'POST':
+
+        password = request.json.get('password_digest_str')
+        if password is None:
+            abort_by_missing_param('password_digest_str')
+        
+        username = request.json.get('username')
+        if username is None:
+            abort_by_missing_param('username')
+        
+        if g.store.user_exists(username, 'user_table'):
+            return jsonify(message='user {0} is already defined.'.format(username)), 409
+
+        idPubkeyMap = id_lib.BBcIdPublickeyMap(domain_id)
+        user_id, keypairs = idPubkeyMap.create_user_id(num_pubkeys=1)
+
+        g.store.write_user(User(user_id, username, password, keypairs[0]), 'user_table')
+
+        return jsonify(user_id_str=bbclib.convert_id_to_string(user_id),
+                public_key=bbclib.convert_id_to_string(keypairs[0].public_key),
+                private_key=bbclib.convert_id_to_string(keypairs[0].private_key), 
+                username=username), 200

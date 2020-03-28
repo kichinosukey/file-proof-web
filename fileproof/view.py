@@ -4,7 +4,9 @@ import json
 from datetime import datetime
 
 import requests
-from flask import Blueprint, jsonify, request, render_template, send_file, session
+from flask import (
+    Blueprint, jsonify, redirect, request, 
+    render_template, send_file, session)
 from werkzeug.utils import secure_filename
 
 from bbc1.core import bbclib 
@@ -21,14 +23,8 @@ ALLOWED_EXTENSIONS = {'txt'}
 fileproof = Blueprint('fileproof', __name__, static_folder='./static', template_folder='./templates')
 
 
-domain_id = bbclib.get_new_id("file_proof_test_domain", include_timestamp=False)
-domain_id_str = bbclib.convert_id_to_string(domain_id)
 asset_group_id = bbclib.get_new_id("file_proof_asset_group", include_timestamp=False)
 asset_group_id_str = bbclib.convert_id_to_string(asset_group_id)
-user_name = "user_default"
-user_id = bbclib.get_new_id(user_name, include_timestamp=False)
-user_id_str = bbclib.convert_id_to_string(user_id)
-key_pair = None
 
 
 def allowed_file(filename):
@@ -57,6 +53,26 @@ def get_id_from_mappings(name, asset_group_id):
                 result['asset_id'] = binascii.a2b_hex(mapping[asset_group_id_str][name]['asset_id'])
         return result
     return None
+
+def replace_keypair():
+    if session.get('username') is None:
+        return render_template('fileproof/message.html', message="user name is not in session.")
+    
+    if session.get('password_digest_str') is None:
+        return render_template('fileproof/message.html', message="password is not in session.")
+    
+    r = requests.post(PREFIX_API + '/api/new-keypair',
+            json={
+                'username': session['username'],
+                'password_digest_str': session['password_digest_str']
+                })
+    res = r.json()
+
+    if r.status_code != 200:
+        return render_template('fileproof/message.html', message="Failed to replace keypair.")
+
+    session['public_key_str'] = res['public_key_str']
+    session['private_key_str'] = res['private_key_str']
 
 def store_id_mappings(name, asset_group_id, transaction_id=None, asset_ids=None):
     if transaction_id is None and asset_ids is None:
@@ -87,10 +103,15 @@ def index():
 
 @fileproof.route('/get', methods=['GET'])
 def set_get_filename():
+    if session.get('username') is None:
+        return redirect('/fileproof/sign-in')
     return render_template('fileproof/set_file.html', action='/fileproof/get/file')
 
 @fileproof.route('/get/file', methods=['GET'])
 def get_file():
+
+    if session.get('username') is None:
+        return redirect('/fileproof/sign-in')
 
     if request.method == 'GET':
 
@@ -104,15 +125,14 @@ def get_file():
         r = requests.get(PREFIX_API + '/api/file', 
                 params={
                     'asset_id_str': bbclib.convert_id_to_string(fileinfo['asset_id']),
-                    'domain_id_str': domain_id_str,
-                    'user_id_str': user_id_str,
+                    'user_id_str': session['user_id_str'],
                     'asset_group_id_str': asset_group_id_str,
                     })
 
         res = r.json()
 
         out_file_name, ext = os.path.splitext(filename)
-        if os.path.exists(out_file_name):
+        if os.path.exists(filename):
             current_datetime = datetime.now()
             time_str = current_datetime.strftime('_%Y%m%d%H%M%S')
             out_file_name += (time_str + ext)
@@ -125,23 +145,11 @@ def get_file():
         return render_template('fileproof/message.html', 
                     message="done get %s" % out_file_name)
 
-@fileproof.route('/keypair', methods=['GET'])
-def get_keypair():
-
-    r = requests.get(PREFIX_API + '/api/keypair')
-    res = r.json()
-
-    privkey_str = res['private_key_str']
-    pubkey_str = res['public_key_str']
-
-    session['private_key_str'] = privkey_str
-    session['public_key_str'] = pubkey_str
-
-    return render_template('fileproof/message.html', 
-                message="Keypair was created successfully.")
-
 @fileproof.route('/list', methods=['GET'])
 def list_transaction():
+
+    if session.get('username') is None:
+        return redirect('/fileproof/sign-in')
 
     if request.method == 'GET':
 
@@ -157,29 +165,94 @@ def list_transaction():
                     'asset_id_str': asset_id_str,
                     'asset_group_id_str': asset_group_id_str,
                     'count': count,
-                    'domain_id_str': domain_id_str,
                     'direction': direction,
                     'start_from': start_from,
                     'until': until,
                     'user_id_search_str': user_id_search_str,
-                    'user_id_str': user_id_str
+                    'user_id_str': session['user_id_str']
                 })
         res = r.json()
 
         return render_template('fileproof/list.html', 
                     transactions=res['transactions'])
 
-@fileproof.route('/setup', methods=['GET'])
-def domain_setup():
+@fileproof.route('/sign-in', methods=['GET', 'POST'])
+def signin():
 
-    r = requests.post(PREFIX_API + '/api/domain', json={'domain_id_str': domain_id_str})
-    res = r.json()
+    if request.method == 'GET':
+        return render_template('fileproof/sign-in.html')
 
-    return render_template('fileproof/message.html', 
-                message="Domain ID(%s) setup was success." % res['domain_id_str'])
+    elif request.method == 'POST':
+        
+        password = request.form.get('password')
+        if password is None or len(password) <= 0:
+            return render_template('fileproof/message.html', message="ERROR: Password is missing.")
+        password_digest = bbclib.get_new_id(password, include_timestamp=False)
+        password_digest_str = bbclib.convert_id_to_string(password_digest)
+
+        username = request.form.get('username')
+        if username is None or len(username) <= 0:
+            return render_template('fileproof/message.html', message='ERROR: User name is missing.')
+
+        r = requests.get(PREFIX_API + '/api/user/keypair',
+                params={
+                    'password_digest_str': password_digest_str,
+                    'username': username
+                })
+        res = r.json()
+        
+        if r.status_code != 200:
+            return render_template('fileproof/message.html', message=res['message'])
+
+        session['username'] = username
+        session['user_id_str'] = res['user_id_str']
+        session['public_key_str'] = res['public_key_str']
+        session['private_key_str'] = res['private_key_str']
+
+        return render_template('fileproof/message.html', message="Getting keypair was success.")
+
+@fileproof.route('/sign-up', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'GET':
+        return render_template('fileproof/sign-up.html')
+
+    elif request.method == 'POST':
+
+        r = requests.get(PREFIX_API + '/api/domain')
+        res = r.json()
+
+        if r.status_code != 200:
+            return render_template('fileproof/message.html', 
+                    message="ERROR: Failed to connect core node to domain(%s)." % res['domain_id'])
+        
+        password = request.form.get('password')
+        if password is None or len(password) <= 0:
+            return render_template('fileproof/message.html', 
+                    message="ERROR: Password is missing.")
+        password_digest = bbclib.get_new_id(password, include_timestamp=False)
+        password_digest_str = bbclib.convert_id_to_string(password_digest)
+        
+        username = request.form.get('username')
+        if username is None or len(username) <= 0:
+            return render_template('fileproof/message.html', message='ERROR: User name is missing.')
+
+        r = requests.post(PREFIX_API + '/api/user', 
+                json={
+                    'password_digest_str': password_digest_str,
+                    'username': username
+                })
+        res = r.json()
+
+        if r.status_code != 200:
+            return render_template('fileproof/message.html', message=res['message'])
+        
+        return redirect('/fileproof/sign-in')
 
 @fileproof.route('/store', methods=['GET', 'POST'])
 def store_file():
+
+    if session.get('username') is None:
+        return redirect('/fileproof/sign-in')
 
     if request.method == 'GET':
         return render_template('fileproof/store_file.html', action='/fileproof/store')
@@ -191,44 +264,45 @@ def store_file():
         filename = secure_filename(file.filename)
         filepath = './' + filename #FIXME specific data directory is needed
 
-    fileinfo = get_id_from_mappings(os.path.basename(filepath), asset_group_id)
+    fileinfo = get_id_from_mappings(os.path.basename(filename), asset_group_id)
     if fileinfo is not None:
-        return render_template('fileproof/fileinfo_already_exists.html')
+        return render_template('fileproof/message.html', 
+                message="ERROR: File %s is already existed." % filename)
 
-    user_info = "Owner is %s" % user_name
+    user_info = "Owner is %s" % session['username']
     
     r = requests.post(PREFIX_API + '/api/file', 
             json={
                 'asset_body': user_info,
                 'asset_file': data_non_bytes,
                 'asset_group_id_str': asset_group_id_str,
-                'domain_id_str': domain_id_str, 
                 'private_key_str': session['private_key_str'],
                 'public_key_str': session['public_key_str'],
                 'tx_id_str': None,
-                'user_id_str': user_id_str})
-
+                'user_id_str': session['user_id_str']})
     res = r.json()
 
-    if res['status'] == 'success':
-        asset_ids = binascii.a2b_hex(res['asset_ids_str'])
-        transaction_id = binascii.a2b_hex(res['transaction_id_str'])
+    if r.status_code != 200:
+        return render_template('fileproof/message.html', message=res['message'])
 
-        store_id_mappings(os.path.basename(filepath), asset_group_id, 
-                transaction_id=transaction_id, asset_ids=asset_ids)
+    asset_ids = bbclib.convert_idstring_to_bytes(res['asset_ids_str'])
+    transaction_id = bbclib.convert_idstring_to_bytes(res['transaction_id_str'])
+    store_id_mappings(os.path.basename(filepath), asset_group_id, 
+            transaction_id=transaction_id, asset_ids=asset_ids)
 
-        message = "Store file was success. \n"
-        message += "asset_id: %s \n" % res['asset_ids_str']
-        message += "transaction_id: %s \n" % res['transaction_id_str']
+    message = "Store file was success. \n"
+    message += "asset_id: %s \n" % res['asset_ids_str']
+    message += "transaction_id: %s \n" % res['transaction_id_str']
 
-    elif res['status'] == 'error':
-        message = res['message']
+    replace_keypair()
 
     return render_template('fileproof/message.html', message=message)
 
-
 @fileproof.route('/update', methods=['GET', 'POST'])
 def update_file():
+
+    if session.get('username') is None:
+        return redirect('/fileproof/sign-in')
 
     if request.method == 'GET':
         return render_template('fileproof/store_file.html', action='/fileproof/update')
@@ -248,9 +322,9 @@ def update_file():
 
         fileinfo = get_id_from_mappings(os.path.basename(filepath), asset_group_id)
         if fileinfo is None:
-            return render_template('fileproof/fileinfo_already_exists.html', file=filename)
+            return render_template('fileproof/message.html', message="ERROR: %s is already existed." % file.filename)
 
-        user_info = "Owner is %s" % user_name
+        user_info = "Owner is %s" % session['username']
 
         transaction_id = fileinfo['transaction_id']
         transaction_id_str = bbclib.convert_id_to_string(transaction_id)
@@ -260,37 +334,44 @@ def update_file():
                     'asset_body': user_info,
                     'asset_file': data_non_bytes,
                     'asset_group_id_str': asset_group_id_str,
-                    'domain_id_str': domain_id_str, 
                     'private_key_str': session['private_key_str'],
                     'public_key_str': session['public_key_str'],
                     'tx_id_str': transaction_id_str,
-                    'user_id_str': user_id_str})
+                    'user_id_str': session['user_id_str']})
 
         res = r.json()
 
-        if res['status'] == 'success':
-            asset_ids = binascii.a2b_hex(res['asset_ids_str'])
-            transaction_id = binascii.a2b_hex(res['transaction_id_str'])
+        if r.status_code != 200:
+            return render_template('fileproof/message.html', message=res['message'])
 
-            store_id_mappings(os.path.basename(filepath), asset_group_id, 
+        asset_ids = bbclib.convert_idstring_to_bytes(res['asset_ids_str'])
+        transaction_id = bbclib.convert_idstring_to_bytes(res['transaction_id_str'])
+        store_id_mappings(os.path.basename(filepath), asset_group_id, 
                 transaction_id=transaction_id, asset_ids=asset_ids)
 
-            message = "File update was success.\n"
-            message += "asset_ids: %s \n" % res['asset_ids_str']
-            message += "transaction_id: %s \n" % res['transaction_id_str']
-        
-        elif res['status'] == 'error':
-            message = res['message']
+        message = "File update was success.\n"
+        message += "asset_ids: %s \n" % res['asset_ids_str']
+        message += "transaction_id: %s \n" % res['transaction_id_str']
+
+        replace_keypair()
 
         return render_template('fileproof/message.html', message=message)
 
 @fileproof.route('/verify', methods=['GET'])
 def verify():
+
+    if session.get('username') is None:
+        return redirect('/fileproof/sign-in')
+
     if request.method == 'GET':
         return render_template('fileproof/set_file.html', action='/fileproof/verify/file')
 
 @fileproof.route('/verify/file', methods=['GET'])
 def verify_file():
+
+    if session.get('username') is None:
+        return redirect('/fileproof/sign-in')
+
     if request.method == 'GET':
 
         filename = request.args.get('file')
@@ -306,19 +387,12 @@ def verify_file():
                     params={
                         'asset_id_str': asset_id_str,
                         'asset_group_id_str': asset_group_id_str,
-                        'domain_id_str': domain_id_str,
-                        'user_id_str': user_id_str
+                        'user_id_str': session['user_id_str']
                     })
-
         res = r.json()
 
-        if res['status'] == 'valid':
-            message = "%s is valid." % filename
+        if r.status_code != 200:
+            return render_template('fileproof/message.html', message=res['message'])
 
-        elif res['status'] == 'invalid' and res['message'] is None:
-            message = "%s is invalid" % filename
-
-        else:
-            message = "Transaction data is invalid."
-
-        return render_template('fileproof/message.html', message=message)
+        return render_template('fileproof/message.html', 
+                    message="%s is valid." % filename)
