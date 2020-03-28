@@ -17,6 +17,14 @@ $ python3 -m venv venv
 $ source venv/bin/activate
 
 $ pip install bbc1
+
+$ git clone https://github.com/beyond-blockchain/bbc1-lib-std.git
+
+$ cd bbc1-lib-std/
+
+$ python setup.py sdist
+
+$ pip install dist/bbc1-lib-std-0.19.tar.gz # in 28 March 2020
 ```
 
 # How to use
@@ -36,10 +44,13 @@ $ python index.py
 Open your browser and access [application page](http://127.0.0.1:5000/fileproof).
 
 Application menu  
-- keypair: create keypair
+- sign up
+- sign in: initial keypair is created in this process
 - setup: connect to domain
 - store: store file
 - get file
 - update file
 - verify file
 - list: list transaction history
+
+Replacement of keypair is processed after insertion of transaction automatically.
