@@ -1,0 +1,16 @@
+{% import 'fileproof/macro.html' as macros %}
+{% extends 'fileproof/layout.html' %}
+{% block content %}
+<h2>SIGN UP</h2>
+<form action="/fileproof/sign-up" method="post">
+  <div>
+    <label for="username">Name : </label>
+    <input type="text" id="username" name="username" required>
+  </div>
+  <div>
+    <label for="password">Password : </label>
+    <input type="password" id="password" name="password" minlength="4" required>
+  </div>
+  <input type="submit" value="Sign Up">
+</form>
+{% endblock %}

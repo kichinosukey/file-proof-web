@@ -28,7 +28,6 @@ app.register_blueprint(api, url_prefix='/api')
 from fileproof.view import fileproof
 app.register_blueprint(fileproof, url_prefix='/fileproof')
 
-
 app.secret_key = '!jnTCz._JM6eDRQW!xiRpA!M.8GdZy6cHnjX.!pY3@3Q2AjD_oyQh'
 
 
