@@ -17,7 +17,6 @@ MAPPING_FILE = ".bbc_id_mappings"
 PUBLIC_KEY = ".public_key"
 PRIVATE_KEY = ".private_key"
 PREFIX_API = 'http://127.0.0.1:5000' #FIXME to be flexible
-ALLOWED_EXTENSIONS = {'txt'}
 
 
 fileproof = Blueprint('fileproof', __name__, static_folder='./static', template_folder='./templates')
@@ -27,9 +26,9 @@ asset_group_id = bbclib.get_new_id("file_proof_asset_group", include_timestamp=F
 asset_group_id_str = bbclib.convert_id_to_string(asset_group_id)
 
 
-def allowed_file(filename):
+def allowed_file(filename, allowed_ext={'txt'}):
     return '.' in filename and \
-        filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+        filename.rsplit('.', 1)[1].lower() in allowed_ext
 
 def get_id_from_mappings(name, asset_group_id):
     if not os.path.exists(MAPPING_FILE):
@@ -54,25 +53,24 @@ def get_id_from_mappings(name, asset_group_id):
         return result
     return None
 
-def replace_keypair():
-    if session.get('username') is None:
-        return render_template('fileproof/message.html', message="user name is not in session.")
-    
-    if session.get('password_digest_str') is None:
-        return render_template('fileproof/message.html', message="password is not in session.")
-    
-    r = requests.post(PREFIX_API + '/api/new-keypair',
-            json={
-                'username': session['username'],
-                'password_digest_str': session['password_digest_str']
-                })
-    res = r.json()
+def load_keypair():
 
-    if r.status_code != 200:
-        return render_template('fileproof/message.html', message="Failed to replace keypair.")
+    with open(PUBLIC_KEY, "rb") as fin:
+        public_key = fin.read()
+    
+    with open(PRIVATE_KEY, "rb") as fin:
+        private_key = fin.read()
 
-    session['public_key_str'] = res['public_key_str']
-    session['private_key_str'] = res['private_key_str']
+    return public_key, private_key
+
+def save_keypair(keypair):
+
+    with open(PRIVATE_KEY, "wb") as fout:
+        fout.write(keypair.private_key)
+    
+    with open(PUBLIC_KEY, "wb") as fout:
+        fout.write(keypair.public_key)
+
 
 def store_id_mappings(name, asset_group_id, transaction_id=None, asset_ids=None):
     if transaction_id is None and asset_ids is None:
@@ -145,6 +143,43 @@ def get_file():
         return render_template('fileproof/message.html', 
                     message="done get %s" % out_file_name)
 
+@fileproof.route('/keypair/create', methods=['GET'])
+def create_keypair():
+    if request.method == 'GET':
+        keypair = bbclib.KeyPair()
+        keypair.generate()
+
+        save_keypair(keypair)
+
+        return render_template('fileproof/message.html', message="Keypair was created successfully.")
+
+@fileproof.route('/keypair/replace', methods=['POST'])
+def replace_keypair():
+    if request.method == 'POST':
+
+        if session.get('username') is None:
+            return render_template('fileproof/message.html', message="user name is not in session.")
+        
+        if session.get('password_digest_str') is None:
+            return render_template('fileproof/message.html', message="password is not in session.")
+        
+        r = requests.post(PREFIX_API + '/api/new-keypair',
+                json={
+                    'username': session['username'],
+                    'password_digest_str': session['password_digest_str']
+                    })
+        res = r.json()
+
+        if r.status_code != 200:
+            return render_template('fileproof/message.html', message="Failed to replace keypair.")
+
+        public_key = bbclib.convert_idstring_to_bytes(res['public_key_str'])
+        private_key = bbclib.convert_idstring_to_bytes(res['private_key_str'])
+        save_keypair(bbclib.Keypair(privkey=private_key, pubkey=public_key))
+
+        return render_template('fileproof/message.html', message="Keypair was replaced successfully.")
+
+
 @fileproof.route('/list', methods=['GET'])
 def list_transaction():
 
@@ -206,8 +241,6 @@ def signin():
 
         session['username'] = username
         session['user_id_str'] = res['user_id_str']
-        session['public_key_str'] = res['public_key_str']
-        session['private_key_str'] = res['private_key_str']
 
         return render_template('fileproof/message.html', message="Getting keypair was success.")
 
@@ -245,6 +278,15 @@ def signup():
 
         if r.status_code != 200:
             return render_template('fileproof/message.html', message=res['message'])
+
+        public_key = bbclib.convert_idstring_to_bytes(res['public_key_str'])
+        private_key = bbclib.convert_idstring_to_bytes(res['private_key_str'])
+
+        with open(PRIVATE_KEY, "wb") as fout:
+            fout.write(private_key)
+        
+        with open(PUBLIC_KEY, "wb") as fout:
+            fout.write(public_key)
         
         return redirect('/fileproof/sign-in')
 
@@ -270,14 +312,16 @@ def store_file():
                 message="ERROR: File %s is already existed." % filename)
 
     user_info = "Owner is %s" % session['username']
+
+    public_key, private_key = load_keypair()
     
     r = requests.post(PREFIX_API + '/api/file', 
             json={
                 'asset_body': user_info,
                 'asset_file': data_non_bytes,
                 'asset_group_id_str': asset_group_id_str,
-                'private_key_str': session['private_key_str'],
-                'public_key_str': session['public_key_str'],
+                'private_key_str': bbclib.convert_id_to_string(private_key),
+                'public_key_str': bbclib.convert_id_to_string(public_key),
                 'tx_id_str': None,
                 'user_id_str': session['user_id_str']})
     res = r.json()
@@ -293,8 +337,6 @@ def store_file():
     message = "Store file was success. \n"
     message += "asset_id: %s \n" % res['asset_ids_str']
     message += "transaction_id: %s \n" % res['transaction_id_str']
-
-    replace_keypair()
 
     return render_template('fileproof/message.html', message=message)
 
@@ -329,13 +371,15 @@ def update_file():
         transaction_id = fileinfo['transaction_id']
         transaction_id_str = bbclib.convert_id_to_string(transaction_id)
 
+        public_key, private_key = load_keypair()
+
         r = requests.post(PREFIX_API + '/api/file', 
                 json={
                     'asset_body': user_info,
                     'asset_file': data_non_bytes,
                     'asset_group_id_str': asset_group_id_str,
-                    'private_key_str': session['private_key_str'],
-                    'public_key_str': session['public_key_str'],
+                    'private_key_str': bbclib.convert_id_to_string(private_key),
+                    'public_key_str': bbclib.convert_id_to_string(public_key),
                     'tx_id_str': transaction_id_str,
                     'user_id_str': session['user_id_str']})
 
@@ -352,8 +396,6 @@ def update_file():
         message = "File update was success.\n"
         message += "asset_ids: %s \n" % res['asset_ids_str']
         message += "transaction_id: %s \n" % res['transaction_id_str']
-
-        replace_keypair()
 
         return render_template('fileproof/message.html', message=message)
 

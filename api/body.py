@@ -131,7 +131,6 @@ class Store:
         )
         return len(rows) > 0
 
-
     def write_user(self, user, table):
         self.db.exec_sql(
             self.domain_id,
@@ -199,8 +198,7 @@ def store_proc(asset_body, asset_file, asset_group_id, domain_id, key_pair, user
     assert ret
     response_data = bbc_app_client.callback.synchronize()
     if response_data[KeyType.status] < ESUCCESS:
-        print("ERROR: ", response_data[KeyType.reason].decode())
-        sys.exit(0)
+        return None, None, "ERROR: %s" % response_data[KeyType.reason].decode()
 
     transaction_id = response_data[KeyType.transaction_id]
     asset_ids = store_transaction.relations[0].asset.asset_id
@@ -300,6 +298,9 @@ def store_file():
         asset_ids, transaction_id, message = \
             store_proc(asset_body, asset_file_bytes, asset_group_id, 
                 domain_id, keypair, user_id, txid=tx_id)
+        
+        if message is not None:
+            return jsonify(message=message), 404
 
         if asset_ids is None:
             return jsonify(message="ERROR: asset_id is not found"), 404
@@ -471,25 +472,6 @@ def list_users():
     dics = [{'username': user.name, 'user_id': bbclib.convert_id_to_string(user.user_id)} for user in users]
     return jsonify(users=dics), 200
 
-@api.route('/user/keypair', methods=['GET'])
-def get_user_keypair():
-    
-    username = request.args.get('username')
-    password_digest_str = request.args.get('password_digest_str')
-
-    user = g.store.read_user(username, 'user_table')
-    if user is None:
-        return jsonify(message='user {0} is not found'.format(username)), 404
-    
-    if user.password != password_digest_str:
-        return jsonify(message='password is incorrect.'), 404
-
-    return jsonify(username=username, 
-            user_id_str=bbclib.convert_id_to_string(user.user_id),
-            public_key_str=bbclib.convert_id_to_string(user.keypair.public_key),
-            private_key_str=bbclib.convert_id_to_string(user.keypair.private_key)
-            ), 200
-
 @api.route('/user', methods=['POST'])
 def define_user():
 
@@ -511,7 +493,25 @@ def define_user():
 
         g.store.write_user(User(user_id, username, password, keypairs[0]), 'user_table')
 
-        return jsonify(user_id_str=bbclib.convert_id_to_string(user_id),
-                public_key=bbclib.convert_id_to_string(keypairs[0].public_key),
-                private_key=bbclib.convert_id_to_string(keypairs[0].private_key), 
-                username=username), 200
+        return jsonify(public_key_str=bbclib.convert_id_to_string(keypairs[0].public_key),
+                private_key_str=bbclib.convert_id_to_string(keypairs[0].private_key)), 200
+
+@api.route('/user/keypair', methods=['GET'])
+def get_user_keypair():
+    
+    username = request.args.get('username')
+    password_digest_str = request.args.get('password_digest_str')
+
+    user = g.store.read_user(username, 'user_table')
+    if user is None:
+        return jsonify(message='user {0} is not found'.format(username)), 404
+    
+    if user.password != password_digest_str:
+        return jsonify(message='password is incorrect.'), 404
+
+    return jsonify(username=username, 
+            user_id_str=bbclib.convert_id_to_string(user.user_id),
+            public_key_str=bbclib.convert_id_to_string(user.keypair.public_key),
+            private_key_str=bbclib.convert_id_to_string(user.keypair.private_key)
+            ), 200
+
