@@ -183,10 +183,16 @@ def store_proc(asset_body, asset_file, asset_group_id, domain_id, key_pair, user
         response_data = bbc_app_client.callback.synchronize()
         if response_data[KeyType.status] < ESUCCESS:
             return None, None, "ERROR: %s" % response_data[KeyType.reason].decode()
-
+        
         prev_tx, fmt_type = bbclib.deserialize(response_data[KeyType.transaction_data])
+
+        keypair = bbclib.KeyPair(privkey=key_pair.private_key, pubkey=key_pair.public_key)
+        if not keypair.verify(prev_tx.transaction_id, prev_tx.signatures[0].signature):
+            return None, None, "ERROR: Signature or keypair is invalid."
+
         bbclib.add_relation_pointer(transaction=store_transaction, relation_idx=0,
                                     ref_transaction_id=prev_tx.transaction_id)
+
     sig = store_transaction.sign(private_key=key_pair.private_key,
                                  public_key=key_pair.public_key)
     store_transaction.get_sig_index(user_id)
